@@ -1,18 +1,15 @@
 import serial
 from multiprocessing import Process, Pipe
 import time
-import sys
 
-#ser1 = serial.Serial('/dev/ttyUSB0', 115200)
-#print(ser1.name)
-#while True:
-#    x = ser1.read(6)
-#    print(x)
-#ser1.close()
-#for i in range(0, 4294967296):
-#    a = 1
 
-#print(a)
+START = bytes([0xf0])
+END = bytes([0xff])
+ACCK = bytes([0xf1])
+ERR = bytes([0xee])
+FAIL = bytes([0xf2])
+CAN_REC = bytes([0xf4])
+SIG_FOUND = bytes([0xf3])
 
 global_bool = True
 
@@ -21,10 +18,12 @@ def test_nlfsr(state, x):
     period = 2**len(state) - 1
     initial = state[:]
     i = 0
+    print(state)
     while True:
         i += 1
         feedback = int(state[0]) ^ (int(state[x[0]]) & int(state[x[1]])) ^ int(state[x[2]]) ^ int(state[x[3]]) ^ int(state[x[4]]) ^ int(state[x[5]])
         state = state[1:] + str(feedback)
+        #print(state)
         if state == initial:
             break
         if i > period:
@@ -41,72 +40,97 @@ def change(x):
             return i
 
 
-def reading(conn):
-    try:
-        res_file = open('results', 'w')
-        x = [7, 18, 1, 8, 9, 15]
-        ser1 = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.5)
-        ser1.close()
-        ser1.open()
-        print('opened')
-        # while True:
-        #     out = ''
-        #     x = ser1.read(1)
-        #     if x == bytes([0xff]):
-        #         while True:
-        #             x = ser1.read(1)
-        #             if x == bytes([0xfe]):
-        #                 out += '\n'
-        #                 break
-        #             out += str(change(x))
-        #             out += ' '
-        #     res_file.write(out)
-        #     res_file.flush()
-        #     conn.send(out)
-        ser1.write(bytes([0xf0]))
-        #print('sent : ', bytes([0xf0]))
-        t = ser1.read(size=1)
-        #print(t)
-        for i in range(6):
-            ser1.write(bytes([x[i]]))
-        #print('sent : polynomial')
-        ser1.write(bytes([0xff]))
-        #print('sent : ', bytes([0xff]))
-        t = ser1.read(size=1)
-        #print(t)
-        t = ser1.read(size=1)
-        if t == bytes([0xf0]):
+def take_poly(poly_file):
+    poly1 = poly_file.readline()
+    if poly1 == '':
+        return -1
+    poly1 = poly1[:len(poly1) - 1]
+    poly1 = poly1.split(' ')
+    poly = []
+    for i in poly1:
+        poly.append(int(i))
+    print(poly)
+    return poly
+
+
+def server(ser1):
+    poly_file = open('polyFile', 'r')
+    give_poly = True
+    res_file = open('results', 'w')
+    while True:
+        t = ser1.read()
+        if give_poly:
+            poly = take_poly(poly_file)
+            if poly == -1:
+                print('koniec')
+                return
+            give_poly = False
+        if t == SIG_FOUND:
+            ser1.write(ACCK) # moge odebrac
             out = ''
             while True:
-                x = ser1.read(1)
-                #print(x)
-                if x == bytes([0xff]):
-                    out += '\n'
+                x = ser1.read(size=1)
+                if x == SIG_FOUND:
+                    continue
+                if x == END:
+                    out = out[:len(out)-1] + '\n'
                     break
-                out += str(change(x))
-                out += ' '
-            print(out)
-        ser1.close()
-    except (KeyboardInterrupt):
-        ser1.close()
-        print('Przerwano z klawiatury')
-    # print(test_nlfsr('11100000000', [2, 10, 6, 10, 10, 8]))
-
-
-def worker(conn):
-    try:
-        while True:
-            num = conn.recv()
-            print(num)
-    except KeyboardInterrupt:
-        print('koniec')
+                temp = str(change(x))
+                if temp is not None:
+                    out += temp
+                    out += ' '
+            out += '\n'
+            res_file.writelines(out)
+            x = ser1.read(size=1)
+            continue
+        if not t:
+            ser1.write(START)
+            t = ser1.read()
+            if t == CAN_REC:       # fpga can receive
+                for i in range(len(poly)):
+                    ser1.write(bytes([poly[i]]))
+                ser1.write(END)
+                t = ser1.read(size=1)
+                if t == ACCK:   # ACCK
+                    give_poly = True
+                    continue
+                else:
+                    continue
+            elif t == ERR:    #error
+                continue
+            elif t == SIG_FOUND:
+                ser1.write(ACCK)  # moge odebrac
+                out = ''
+                while True:
+                    x = ser1.read(size=1)
+                    if x == SIG_FOUND:
+                        continue
+                    if x == END:
+                        out = out[:len(out) - 1] + '\n'
+                        break
+                    temp = str(change(x))
+                    if temp is not None:
+                        out += temp
+                        out += ' '
+                out += '\n'
+                res_file.write(out)
+                x = ser1.read(size=1)
+                continue
+            elif t == FAIL:
+                continue
+        if t == FAIL:
+            continue
 
 
 if __name__ == '__main__':
-    child, parent = Pipe()
-    listener = Process(target=reading, args=(child,))
-    trololo = Process(target=worker, args=(parent,))
-    listener.start()
-    #trololo.start()
-    listener.join()
-    #trololo.join()
+    try:
+        ser1 = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
+        ser1.close()
+        ser1.open()
+        Server = Process(target=server, args=(ser1,))
+        Server.start()
+        Server.join()
+    except KeyboardInterrupt:
+        print('Przerwano z klawiatury')
+        ser1.close()
+
